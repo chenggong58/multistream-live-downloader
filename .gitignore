@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# 下载产物
+*.mp4
+*.mp3
+*.mkv
+*.webm
+*.flv
+*.ts
+*.m4a
+*.part
+*.ytdl
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
