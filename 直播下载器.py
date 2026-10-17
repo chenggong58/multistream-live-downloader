@@ -5,6 +5,7 @@
 - 自动识别平台，自动下载最高画质
 - 多行链接、多任务并发下载、中途加播
 - 每个下载跑在独立子进程里，点「停止」用 taskkill 强杀进程树，100% 能停
+- 关闭窗口时自动清理所有下载子进程，不会残留后台下载
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -40,6 +41,14 @@ def worker_main(url, save, proxy):
     }
     if proxy:
         opts['proxy'] = f'http://{proxy}'
+
+    # 心跳：即便 ffmpeg 拉流不触发进度回调，也让界面知道任务还活着
+    def heartbeat():
+        import time
+        while True:
+            time.sleep(2)
+            print("ALIVE", flush=True)
+    threading.Thread(target=heartbeat, daemon=True).start()
 
     def hook(d):
         if d['status'] == 'downloading':
@@ -129,6 +138,12 @@ def read_worker(tid):
     try:
         for line in p.stdout:
             line = line.strip()
+            if line == "ALIVE":
+                # 心跳：任务还活着，但不产生精确进度（ffmpeg 拉流时）就显示为下载中
+                if tasks[tid]["status"] in ("排队中", "分析中", "下载中…"):
+                    tasks[tid]["status"] = "下载中…"
+                    root.after(0, lambda: update_row(tid))
+                continue
             if line.startswith("PROGRESS:"):
                 parts = line.split(":")
                 if parts[1] == "MB":
@@ -292,5 +307,19 @@ if __name__ == "__main__":
 
         # 启动自检
         auto_check_startup()
+
+        # 关闭窗口时清理所有 worker 子进程，防止变成孤儿进程继续下载
+        def on_close():
+            for t in tasks.values():
+                p = t.get("proc")
+                if p and p.poll() is None:
+                    try:
+                        subprocess.run(["taskkill", "/pid", str(p.pid), "/T", "/F"],
+                                       capture_output=True,
+                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    except Exception:
+                        pass
+            root.destroy()
+        root.protocol("WM_DELETE_WINDOW", on_close)
 
         root.mainloop()
