@@ -118,7 +118,9 @@ def run_task(tid, url, save_path, use_proxy):
         'fragment_retries': 10,
         'retry_sleep': 'exp=1:20',
         'concurrent_fragments': 4,
-        'hls_use_mpegts': True,
+        # 直播流用 yt-dlp 原生下载器（不用 ffmpeg 后台拉流），
+        # 这样进度回调才会触发、点「停止」能立即中断下载
+        'hls_use_mpegts': False,
         'no_check_certificate': True,
     }
     if use_proxy:
