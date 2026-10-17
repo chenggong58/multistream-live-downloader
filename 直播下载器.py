@@ -4,6 +4,7 @@
 支持：YouTube / Twitch / B站 / 抖音 / TikTok（国际版）
 - 自动识别平台，自动下载最高画质
 - 多行链接、多任务并发下载、中途加播
+- 任务列表实时显示 画质(4K/2K/1080P等) 与 下载速度
 - 每个下载跑在独立子进程里，点「停止」用 taskkill 强杀进程树，100% 能停
 - 关闭窗口时自动清理所有下载子进程，不会残留后台下载
 """
@@ -66,7 +67,19 @@ def worker_main(url, save, proxy):
     opts['progress_hooks'] = [hook]
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(url, download=True)
+            # 先取视频信息，读取实际分辨率（确保画质一定能显示）
+            info = ydl.extract_info(url, download=False)
+            h = None
+            if info:
+                ei = info['entries'][0] if info.get('entries') else info
+                h = ei.get('height')
+                if not h:
+                    f = ei.get('format') or {}
+                    h = f.get('height') if isinstance(f, dict) else None
+            if h:
+                print(f"RES:{h}", flush=True)
+            # 真正开始下载
+            ydl.download([url])
         print("STATUS:done", flush=True)
     except Exception as e:
         print(f"STATUS:error:{str(e)}", flush=True)
@@ -94,6 +107,16 @@ def guess_platform(url):
     if 'tiktok.com' in u:                      return "TikTok"
     return "未知/自动"
 
+def res_to_text(h):
+    """分辨率数字转画质描述"""
+    if not h: return "-"
+    if h >= 2160: return "4K"
+    if h >= 1440: return "2K"
+    if h >= 1080: return "1080P"
+    if h >= 720:  return "720P"
+    if h >= 480:  return "480P"
+    return f"{h}P"
+
 def auto_check_startup():
     def check():
         proxy = detect_proxy_port()
@@ -111,7 +134,7 @@ def auto_check_startup():
     threading.Thread(target=check, daemon=True).start()
 
 # -------------------------- 任务管理（GUI 主进程） --------------------------
-tasks = {}          # tid -> {platform, url, status, progress, proc, stopped}
+tasks = {}          # tid -> {platform, url, status, progress, res, speed, proc, stopped}
 tid_counter = 0
 added_urls = set()  # 已加入下载的链接，用于中途加播时去重
 
@@ -119,14 +142,16 @@ def add_task(platform, url):
     global tid_counter
     tid_counter += 1
     tid = tid_counter
-    tasks[tid] = {"platform": platform, "url": url, "status": "排队中", "progress": 0, "proc": None, "stopped": False}
-    tree.insert("", "end", iid=str(tid), values=(tid, platform, "排队中", "0%", url))
+    tasks[tid] = {"platform": platform, "url": url, "status": "排队中", "progress": 0,
+                  "res": "-", "speed": "-", "proc": None, "stopped": False}
+    tree.insert("", "end", iid=str(tid), values=(tid, platform, "-", "-", "排队中", "0%", url))
     return tid
 
 def update_row(tid):
     if tree.exists(str(tid)):
         t = tasks[tid]
-        tree.item(str(tid), values=(tid, t["platform"], t["status"], f"{t['progress']:.1f}%", t["url"]))
+        tree.item(str(tid), values=(tid, t["platform"], t["res"], t["speed"], t["status"],
+                                    f"{t['progress']:.1f}%", t["url"]))
 
 def task_status(tid, status):
     tasks[tid]["status"] = status
@@ -144,13 +169,22 @@ def read_worker(tid):
                     tasks[tid]["status"] = "下载中…"
                     root.after(0, lambda: update_row(tid))
                 continue
+            if line.startswith("RES:"):
+                try:
+                    tasks[tid]["res"] = res_to_text(int(line[4:]))
+                except Exception:
+                    tasks[tid]["res"] = "-"
+                root.after(0, lambda: update_row(tid))
+                continue
             if line.startswith("PROGRESS:"):
                 parts = line.split(":")
                 if parts[1] == "MB":
                     tasks[tid]["status"] = f"下载中 {parts[2]}MB"
+                    tasks[tid]["speed"] = "-"
                 else:
                     tasks[tid]["progress"] = float(parts[1])
-                    tasks[tid]["status"] = f"下载中 {parts[1]}% {parts[2]}"
+                    tasks[tid]["status"] = f"下载中 {parts[1]}%"
+                    tasks[tid]["speed"] = parts[2]
                 root.after(0, lambda: update_row(tid))
             elif line.startswith("STATUS:"):
                 cmd = line[len("STATUS:"):]
@@ -247,7 +281,7 @@ if __name__ == "__main__":
         # ============ GUI 模式 ============
         root = tk.Tk()
         root.title("多平台直播下载器（YouTube/Twitch/B站/抖音/TikTok）")
-        root.geometry("780x580")
+        root.geometry("920x580")
         root.resizable(False, False)
 
         # 1. 链接输入（多行）
@@ -278,18 +312,22 @@ if __name__ == "__main__":
                               font=("微软雅黑", 10))
         btn_clear.place(x=540, y=200, width=110, height=45)
 
-        # 5. 任务列表
-        tree = ttk.Treeview(root, columns=("id", "平台", "状态", "进度", "链接"), show="headings", height=10)
+        # 5. 任务列表（id/平台/画质/速度/状态/进度/链接）
+        tree = ttk.Treeview(root, columns=("id", "平台", "画质", "速度", "状态", "进度", "链接"), show="headings", height=10)
         tree.heading("id", text="ID")
         tree.heading("平台", text="平台")
+        tree.heading("画质", text="画质")
+        tree.heading("速度", text="速度")
         tree.heading("状态", text="状态")
         tree.heading("进度", text="进度")
         tree.heading("链接", text="链接")
         tree.column("id", width=40, anchor="center")
-        tree.column("平台", width=80, anchor="center")
-        tree.column("状态", width=200, anchor="center")
-        tree.column("进度", width=80, anchor="center")
-        tree.column("链接", width=340)
+        tree.column("平台", width=70, anchor="center")
+        tree.column("画质", width=65, anchor="center")
+        tree.column("速度", width=95, anchor="center")
+        tree.column("状态", width=150, anchor="center")
+        tree.column("进度", width=70, anchor="center")
+        tree.column("链接", width=330)
         tree.place(x=20, y=260)
 
         # 6. 状态栏
